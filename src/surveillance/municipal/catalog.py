@@ -331,14 +331,29 @@ class Catalog:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
-                "SELECT clip_id,status FROM clips WHERE sha256=?", (metadata["sha256"],)
+                "SELECT clip_id,status,file_path,owned_upload FROM clips WHERE sha256=?",
+                (metadata["sha256"],),
             ).fetchone()
             if existing:
+                original = Path(existing["file_path"]).resolve()
+                if (
+                    existing["status"] == "deleted"
+                    and existing["owned_upload"]
+                    and original.is_relative_to(self.uploads.resolve())
+                ):
+                    # Re-adding a removed upload restores it under the SAME clip_id and the
+                    # SAME stored file path (identical content, same sha256), so catalog
+                    # identity stays immutable and reviews/audit stay attached to it.
+                    path.replace(original)
+                    db.execute(
+                        "UPDATE clips SET status='available' WHERE clip_id=?",
+                        (existing["clip_id"],),
+                    )
+                    self.audit(db, "restore_upload", existing["clip_id"], "local_operator", {})
+                    return existing["clip_id"]
                 path.unlink()
                 if existing["status"] != "available":
-                    raise ValueError(
-                        "Duplicate refers to a deleted clip; preserve its audit identity"
-                    )
+                    raise ValueError("Duplicate refers to an unavailable clip")
                 return existing["clip_id"]
             db.execute(
                 "INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?,1)",

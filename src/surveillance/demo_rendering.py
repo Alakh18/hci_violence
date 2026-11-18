@@ -67,10 +67,7 @@ def reference_gallery(result: dict) -> list:
                     1,
                     cv2.LINE_AA,
                 )
-            label = window["predicted_behavior"] or "No actors — behavior unavailable"
-            caption = (
-                f"{window['reference_timestamp']:.2f}s · {window['actor_count']} actors · {label}"
-            )
+            caption = f"{window['reference_timestamp']:.2f}s · {window['actor_count']} actors"
             output.append((cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), caption))
     finally:
         cap.release()

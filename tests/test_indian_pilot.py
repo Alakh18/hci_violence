@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -259,3 +260,71 @@ def test_merged_splits_keep_assignments_and_never_merge_sources_across_datasets(
     records[0]["split"] = "val"
     with pytest.raises(ValueError, match="leakage"):
         merge_frozen_splits(records, tmp_path / "bad", artifacts=[], scope="test", excluded={})
+
+
+def test_pilot_window_scoring_matches_whole_clip_for_short_clips_and_localizes_long_ones(
+    tmp_path,
+):
+    import torch
+
+    from surveillance.inference.indian_pilot import IndianPilotHead
+    from surveillance.models.indian_binary import FrozenBagBinaryHead
+    from surveillance.video.segmentation import aggregate_segments
+
+    head = FrozenBagBinaryHead(4)
+    with torch.no_grad():
+        head.classifier.weight.copy_(torch.tensor([[0.0] * 4, [8.0, 0, 0, 0]]))
+        head.classifier.bias.copy_(torch.tensor([0.0, -4.0]))
+    checkpoint = tmp_path / "best.pt"
+    torch.save(
+        {
+            "checkpoint_type": "indian_frozen_bag_binary_v1",
+            "classes": ["non_violence", "violence"],
+            "feature_dim": 4,
+            "model_state": head.state_dict(),
+        },
+        checkpoint,
+    )
+    spec = {
+        "checkpoint": "best.pt",
+        "checkpoint_sha256": sha256(checkpoint),
+        "threshold": 0.4,
+        "split_freeze_hash": "f" * 64,
+        "threshold_rule": "fixture",
+    }
+    pilot = IndianPilotHead(spec, tmp_path)
+    calm, fight = [0, 1, 0, 0], [1, 0, 0, 0]
+    short = np.array([calm, fight, fight, calm], dtype=np.float32)  # 2 s at 32 fps
+    result = pilot.score_windows(short, fps=32)
+    assert len(result["windows"]) == 1
+    assert result["violence_score"] == pytest.approx(
+        pilot.score(aggregate_segments(short, 32))["violence_score"]
+    )
+    long = np.array([calm] * 40 + [fight] * 8 + [calm] * 40, dtype=np.float32)  # 44 s
+    result = pilot.score_windows(long, fps=32)
+    assert result["whole_clip_score"] < 0.4 <= result["violence_score"]
+    assert result["flagged"]
+    [(start, end)] = result["flagged_intervals"]
+    assert 18 <= start and end <= 26
+
+
+def test_violence_threshold_override_keeps_spec_file_and_records_the_rule(tmp_path):
+    from surveillance.inference.indian_pilot import resolve_pilot_spec
+
+    (tmp_path / "best.pt").write_bytes(b"x")
+    spec = {
+        "checkpoint": "best.pt",
+        "checkpoint_sha256": "0" * 64,
+        "threshold": 0.4,
+        "split_freeze_hash": "f" * 64,
+        "threshold_rule": "validation max F1",
+    }
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    raised = resolve_pilot_spec(tmp_path, path, 0.6)
+    assert raised["threshold"] == 0.6
+    assert raised["threshold_rule"].startswith("operator override 0.60 (validation-chosen 0.40")
+    assert json.loads(path.read_text(encoding="utf-8"))["threshold"] == 0.4
+    assert resolve_pilot_spec(tmp_path, path, None)["threshold"] == 0.4
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        resolve_pilot_spec(tmp_path, path, 1.5)

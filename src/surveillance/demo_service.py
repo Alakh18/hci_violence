@@ -81,7 +81,12 @@ class DemoService:
         if self.device_fallback:
             result["device_fallback"] = self.device_fallback
         if self.pilot is not None:
-            result["indian_pilot"] = self.pilot.score(self.pipeline.anomaly.last_features)
+            extractor = self.pipeline.anomaly.extractor
+            units = getattr(extractor, "last_units", None)
+            if units is not None:
+                result["indian_pilot"] = self.pilot.score_windows(units, extractor.last_fps)
+            else:
+                result["indian_pilot"] = self.pilot.score(self.pipeline.anomaly.last_features)
         result["timings"]["model_loading_seconds"] = loading
         result["timings"]["request_total_seconds"] = time.perf_counter() - started
         result["execution_mode"] = "on_demand"

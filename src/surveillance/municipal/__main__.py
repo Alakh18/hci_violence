@@ -22,10 +22,11 @@ def settings(args):
     config["municipal_import_root"] = str(args.import_root.resolve()) if args.import_root else None
     config["municipal_concurrency"] = args.concurrency
     config["municipal_max_upload_bytes"] = args.max_upload_mb * 1024 * 1024
-    if args.indian_pilot:
-        from surveillance.inference.indian_pilot import load_pilot_spec
+    from surveillance.inference.indian_pilot import resolve_pilot_spec
 
-        config["indian_pilot"] = load_pilot_spec(args.indian_pilot)
+    pilot = resolve_pilot_spec(ROOT, args.indian_pilot, args.violence_threshold)
+    if pilot:
+        config["indian_pilot"] = pilot
     return config
 
 
@@ -114,7 +115,17 @@ def main():
     parser.add_argument("--concurrency", type=int, choices=range(1, 5), default=1)
     parser.add_argument("--max-upload-mb", type=int, default=500)
     parser.add_argument(
-        "--indian-pilot", type=Path, help="optional Indian pilot head spec (JSON); add-on score"
+        "--indian-pilot",
+        type=Path,
+        help="violence model spec (JSON); default: v3 spec if installed",
+    )
+    parser.add_argument(
+        "--violence-threshold",
+        type=float,
+        default=0.6,
+        # 0.6 instead of v3's validation-chosen 0.40: fewer hugs/handshakes flagged,
+        # at the cost of possibly missing weak fights.
+        help="flag a window as violence at or above this score (default 0.6)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve")

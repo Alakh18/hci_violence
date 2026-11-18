@@ -331,7 +331,17 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument(
-        "--indian-pilot", type=Path, help="optional Indian pilot head spec (JSON); add-on score"
+        "--indian-pilot",
+        type=Path,
+        help="violence model spec (JSON); default: v3 spec if installed",
+    )
+    parser.add_argument(
+        "--violence-threshold",
+        type=float,
+        default=0.6,
+        # 0.6 instead of v3's validation-chosen 0.40: fewer hugs/handshakes flagged,
+        # at the cost of possibly missing weak fights.
+        help="flag a window as violence at or above this score (default 0.6)",
     )
     args = parser.parse_args()
     config = (
@@ -345,10 +355,13 @@ def main() -> None:
         parser.error("--profile professor cannot be combined with --config")
     if args.device:
         config["device"] = args.device
-    if args.indian_pilot:
-        from surveillance.inference.indian_pilot import load_pilot_spec
+    from surveillance.inference.indian_pilot import resolve_pilot_spec
 
-        config["indian_pilot"] = load_pilot_spec(args.indian_pilot)
+    pilot = resolve_pilot_spec(ROOT, args.indian_pilot, args.violence_threshold)
+    if pilot:
+        config["indian_pilot"] = pilot
+    else:
+        print("Violence model not found: answers will show 'Not available'. Pass --indian-pilot.")
     if args.ui == "react":
         import uvicorn
 

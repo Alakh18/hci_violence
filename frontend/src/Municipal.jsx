@@ -3,7 +3,7 @@ import "@fontsource/atkinson-hyperlegible/400.css";
 import "@fontsource/atkinson-hyperlegible/700.css";
 import "@fontsource/public-sans/700.css";
 import "@fontsource/public-sans/800.css";
-import { clockText, decisionLabel, decisions, describeFinding, flaggedMoments, itemStatus, metricText, toggleSelection } from "./platform-utils.js";
+import { clockText, decisionLabel, decisions, describeFinding, flaggedMoments, itemStatus, metricText, toggleSelection, verdictLabel, violenceVerdict } from "./platform-utils.js";
 import "./municipal.css";
 
 const base = "/api/platform";
@@ -14,7 +14,25 @@ async function request(path, options = {}) {
   return payload;
 }
 const post = (path, data = {}) => request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+const remove = path => request(path, { method: "DELETE" });
 const uid = () => crypto.randomUUID();
+// XMLHttpRequest (not fetch) so each file can report real upload progress.
+function uploadFile(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", base + "/uploads");
+    xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      let payload = {};
+      try { payload = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
+      else reject(new Error(typeof payload.detail === "string" ? payload.detail : "This video could not be added."));
+    };
+    xhr.onerror = () => reject(new Error("The app could not be reached. Check that it is still running."));
+    const body = new FormData(); body.append("file", file); xhr.send(body);
+  });
+}
+const sizeText = bytes => bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
 const pretty = value => JSON.stringify(value, null, 2);
 const steps = [["add", "Add videos"], ["checking", "Checking"], ["review", "Your review"]];
 const technicalPages = ["Video library", "Processing queue", "Results & exports", "Accuracy", "Professor console"];
@@ -39,6 +57,10 @@ function Icon({ name, size = 22 }) {
     auto: <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></>,
     list: <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />,
     arrow: <path d="M5 12h14M13 6l6 6-6 6" />,
+    trash: <><path d="M4 7h16M10 11v6M14 11v6" /><path d="M6 7l1 13h10l1-13M9 7V4h6v3" /></>,
+    film: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 5v14M17 5v14M3 9.5h4M3 14.5h4M17 9.5h4M17 14.5h4" /></>,
+    alert: <><path d="M12 4 2.5 20h19z" /><path d="M12 10v4M12 17.5h.01" /></>,
+    shield: <><path d="M12 3 5 6v6c0 4.2 3 7.4 7 9 4-1.6 7-4.8 7-9V6z" /><path d="m9 12 2 2 4-4" /></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={name === "spinner" ? "mp-spin" : undefined}>{shapes[name]}</svg>;
 }
@@ -52,12 +74,9 @@ function Evaluation({ report }) {
     <h2>Evaluation overview</h2><p>{report.warning}</p><p className="muted">{report.definition}</p>
     <div className="mp-metrics">
       <div><strong>{report.eligible_inferred_clips}</strong><span>Eligible inferred clips</span></div>
-      <div><strong>{report.class_labeled}</strong><span>Verified class references</span></div>
-      <div><strong>{metricText(report.behavior.accuracy)}</strong><span>Conditional accuracy</span></div>
-      <div><strong>{metricText(report.behavior.macro_f1)}</strong><span>Six-class macro F1</span></div>
-      <div><strong>{metricText(report.class_coverage)}</strong><span>Class coverage · {report.class_abstentions} abstentions</span></div>
+      <div><strong>{report.violence_labeled}</strong><span>Violence-labeled clips</span></div>
+      <div><strong>{metricText(report.violence.macro_f1)}</strong><span>Violence / non-violence macro F1</span></div>
     </div>
-    <h3>Per-class precision / recall</h3><div className="mp-scroll"><table><thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr></thead><tbody>{Object.entries(report.behavior.per_class).map(([label, m]) => <tr key={label}><td>{label}</td><td>{report.behavior.n ? metricText(m.precision) : "—"}</td><td>{report.behavior.n ? metricText(m.recall) : "—"}</td><td>{report.behavior.n ? metricText(m.f1) : "—"}</td><td>{m.support}</td></tr>)}</tbody></table></div>
     <p>Binary violence: {report.violence.n} covered / {report.violence_labeled} labeled; macro F1 {metricText(report.violence.macro_f1)}. Abstentions: {report.violence_abstentions}.</p>
     <p>Temporal references: {report.temporal.n} clips; false alert seconds {report.temporal.false_alert_seconds.toFixed(2)} / negative seconds {report.temporal.reference_negative_seconds.toFixed(2)}; fraction {metricText(report.temporal.false_alert_fraction)}.</p>
     <details><summary>Library composition, source diversity and selection</summary><pre>{pretty(report.composition)}</pre></details>
@@ -76,9 +95,12 @@ export default function Municipal({ Legacy, Timeline }) {
   const [decision, setDecision] = useState(null), [notes, setNotes] = useState(""), [marks, setMarks] = useState([]), [markStart, setMarkStart] = useState(null);
   const [reference, setReference] = useState(undefined), [current, setCurrent] = useState(0), [saved, setSaved] = useState(false);
   const [includeReferences, setIncludeReferences] = useState(false), [external, setExternal] = useState(false);
+  const [confirm, setConfirm] = useState(null), [uploads, setUploads] = useState([]);
   const [theme, setTheme] = useState(() => stored("mp-theme", "auto")), [names, setNames] = useState(() => stored("mp-names", {})), [dragging, setDragging] = useState(false);
   const video = useRef(null), fileInput = useRef(null), refreshVersion = useRef(0), pendingSubmission = useRef(null);
 
+  // On narrow screens the step tabs scroll sideways; keep the current one in view.
+  useEffect(() => { document.querySelector(".mp-step.on")?.scrollIntoView?.({ block: "nearest", inline: "nearest" }); }, [page]);
   useEffect(() => {
     if (theme === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", theme);
     store("mp-theme", theme);
@@ -121,25 +143,50 @@ export default function Municipal({ Legacy, Timeline }) {
   }
   async function addVideos(files) {
     const videos = files.filter(f => videoTypes.split(",").some(ext => f.name.toLowerCase().endsWith(ext)));
+    const skipped = files.length - videos.length;
     if (!videos.length) { setError("These files aren't videos. Choose MP4, MOV, AVI, MKV or WEBM files."); return; }
-    await action(async () => {
-      const ids = [], next = { ...names };
-      for (const [n, file] of videos.entries()) {
-        setMessage(`Adding video ${n + 1} of ${videos.length}…`);
-        const body = new FormData(); body.append("file", file);
-        const data = await request("/uploads", { method: "POST", body });
+    go("add");
+    const batch = videos.map(f => ({ key: uid(), name: f.name, size: f.size, progress: 0, state: "waiting", error: "" }));
+    setUploads(list => [...batch, ...list.filter(u => !["done", "failed"].includes(u.state))]);
+    const update = (key, patch) => setUploads(list => list.map(u => u.key === key ? { ...u, ...patch } : u));
+    setBusy(true);
+    const ids = [], next = { ...names };
+    for (const [n, file] of videos.entries()) {
+      const { key } = batch[n];
+      update(key, { state: "uploading" });
+      try {
+        const data = await uploadFile(file, progress => update(key, { progress }));
         ids.push(data.clip_id); next[data.clip_id] = file.name;
+        update(key, { state: "done", progress: 1 });
+      } catch (e) { update(key, { state: "failed", error: e.message }); }
+    }
+    setNames(next); store("mp-names", next);
+    try {
+      if (ids.length) {
+        await post("/jobs", { clip_ids: [...new Set(ids)], idempotency_key: uid() });
+        setMessage(ids.length === 1 ? "Your video was added. The app is checking it now." : `${ids.length} videos were added. The app is checking them one at a time.`);
       }
-      setNames(next); store("mp-names", next);
-      await post("/jobs", { clip_ids: [...new Set(ids)], idempotency_key: uid() });
-      go("checking");
-      setMessage(videos.length === 1 ? "Your video was added. The app is checking it now." : `${videos.length} videos were added. The app is checking them one at a time.`);
-    });
+      const failed = videos.length - ids.length;
+      if (failed || skipped) setError([failed && `${failed === 1 ? "1 video" : `${failed} videos`} could not be added. The list below says why.`, skipped && `${skipped === 1 ? "1 file was" : `${skipped} files were`} skipped because ${skipped === 1 ? "it isn't a video" : "they aren't videos"}.`].filter(Boolean).join(" "));
+      await refresh();
+    } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   async function checkClip(clipId) {
     await action(async () => {
       await post("/jobs", { clip_ids: [clipId], idempotency_key: uid() });
       go("checking"); setMessage("The app is checking this video now.");
+    });
+  }
+  async function removeClips(ids) {
+    setConfirm(null);
+    await action(async () => {
+      for (const [n, id] of ids.entries()) {
+        if (ids.length > 1) setMessage(`Removing video ${n + 1} of ${ids.length}…`);
+        await remove(`/clips/${id}/upload`);
+      }
+      setSelected(current => current.filter(id => !ids.includes(id)));
+      if (item && ids.includes(item.clip_id)) { setItem(null); go("add"); }
+      setMessage(ids.length === 1 ? "The video was removed from this computer. Answers you saved are kept." : `${ids.length} videos were removed from this computer. Answers you saved are kept.`);
     });
   }
   async function saveReview() {
@@ -159,67 +206,123 @@ export default function Municipal({ Legacy, Timeline }) {
     if (!clip) return "Video";
     return clip.population === "upload" ? `Uploaded video ${clip.sha256.slice(0, 6)}` : clip.source_video_id;
   };
+  const removed = new Set(clips.filter(c => c.status === "deleted").map(c => c.clip_id));
   const reviewedItems = new Set(results.filter(r => r.review_decision).map(r => r.item_id));
-  const ready = results.filter(r => r.status === "completed" && !r.review_decision);
+  const ready = results.filter(r => r.status === "completed" && !r.review_decision && !removed.has(r.clip_id));
   const finished = results.filter(r => r.review_decision);
-  const items = jobs.flatMap(j => j.items.map(i => ({ ...i, job: j }))).reverse();
+  const items = jobs.flatMap(j => j.items.map(i => ({ ...i, job: j }))).reverse().filter(i => !removed.has(i.clip_id));
+  const checkingIds = new Set(items.filter(i => ["queued", "running"].includes(i.status)).map(i => i.clip_id));
+  const available = clips.filter(c => c.status === "available");
+  const removable = available.filter(c => c.owned_upload && !checkingIds.has(c.clip_id));
+  const removeControl = id => {
+    const clip = clips.find(c => c.clip_id === id);
+    if (!clip || clip.status !== "available" || !clip.owned_upload) return null;
+    if (checkingIds.has(id)) return <span className="mp-hint mp-inline">Stop checking to remove</span>;
+    if (confirm === id) return <span className="mp-confirm" role="group" aria-label="Confirm removal">
+      <span>Remove this video?</span>
+      <button className="mp-btn danger small" disabled={busy} onClick={() => removeClips([id])}><Icon name="trash" size={18} />Yes, remove</button>
+      <button className="mp-btn quiet small" onClick={() => setConfirm(null)}>Cancel</button>
+    </span>;
+    return <button className="mp-btn quiet small" disabled={busy} onClick={() => setConfirm(id)} aria-label={`Remove ${clipName(id)}`}><Icon name="trash" size={18} />Remove</button>;
+  };
   const active = items.filter(i => ["queued", "running"].includes(i.status)).length;
   const nextReady = ready.find(r => r.item_id !== item?.item_id);
   const result = item?.result;
-  const windows = result?.behavior.windows || [];
   const finding = describeFinding(result);
   const moments = flaggedMoments(result);
   const duration = result?.anomaly?.metadata?.duration_sec || item?.clip.metadata?.duration || 1;
   const exportQuery = `references=${includeReferences}&external=${external}`;
+  const verdict = violenceVerdict(result);
+  const verdictTitle = { violence: "Violence detected", non_violence: "No violence detected" }[verdict.state] ?? "No violence answer";
+  const uploading = uploads.some(u => ["waiting", "uploading"].includes(u.state));
+  const thumb = <span className="mp-thumb" aria-hidden="true"><Icon name="film" size={20} /></span>;
+  const onDrop = e => { e.preventDefault(); setDragging(false); if (!busy) addVideos(Array.from(e.dataTransfer.files)); };
+  const dropzone = <div className={`mp-drop ${dragging ? "dragging" : ""}`} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }} onDrop={onDrop} onClick={e => { if (e.target === e.currentTarget && !busy) fileInput.current?.click(); }}>
+    <span className="mp-corner tl" /><span className="mp-corner tr" /><span className="mp-corner bl" /><span className="mp-corner br" />
+    <span className="mp-lens" aria-hidden="true"><Icon name="upload" size={30} /></span>
+    <p className="mp-drop-title">{dragging ? "Drop to add these videos" : "Drag videos here"}</p>
+    <p className="mp-drop-sub">or choose files from this computer. Checking starts as soon as they are added.</p>
+    <button className="mp-btn primary" disabled={busy} onClick={() => fileInput.current?.click()}>Choose videos</button>
+    <input ref={fileInput} type="file" multiple accept={videoTypes} hidden onChange={e => { addVideos(Array.from(e.target.files)); e.target.value = ""; }} />
+    <ul className="mp-formats" aria-label="Supported formats">{["MP4", "MOV", "AVI", "MKV", "WEBM"].map(f => <li key={f}>{f}</li>)}</ul>
+  </div>;
   const stepState = key => page === key ? "on" : (steps.findIndex(s => s[0] === key) < steps.findIndex(s => s[0] === page) ? "done" : "");
 
   return <div className="municipal">
-    <header className="mp-header">
-      <button className="mp-brand" onClick={() => go("home")}>Video review</button>
+    <header className="mp-band">
+    <div className="mp-header">
+      <button className="mp-brand" onClick={() => go("home")}><span className="mp-mark" aria-hidden="true"><svg viewBox="0 0 32 32" width="34" height="34"><rect x="1" y="1" width="30" height="30" rx="9" fill="currentColor" /><path d="M9 11V9h2M21 9h2v2M23 21v2h-2M11 23H9v-2" fill="none" stroke="var(--mp-band)" strokeWidth="2.2" strokeLinecap="round" /><circle cx="16" cy="16" r="3.4" fill="var(--mp-mark)" /></svg></span><span>Violence review<small>Footage check with human review</small></span></button>
       <div className="mp-header-tools">
         <span className="mp-pill"><Icon name="lock" size={16} />Works without internet</span>
         <div className="mp-theme" role="group" aria-label="Colour theme">
-          {[["auto", "Auto"], ["light", "Light"], ["dark", "Dark"]].map(([value, label]) => <button key={value} aria-pressed={theme === value} onClick={() => setTheme(value)}><Icon name={value === "auto" ? "auto" : value === "light" ? "sun" : "moon"} size={16} />{label}</button>)}
+          {[["auto", "Auto"], ["light", "Light"], ["dark", "Dark"]].map(([value, label]) => <button key={value} aria-pressed={theme === value} onClick={() => setTheme(value)} aria-label={`${label} theme`}><Icon name={value === "auto" ? "auto" : value === "light" ? "sun" : "moon"} size={16} /><span>{label}</span></button>)}
         </div>
       </div>
-    </header>
+    </div>
     <nav className="mp-steps" aria-label="Steps">
       {steps.map(([key, label], n) => <button key={key} className={`mp-step ${stepState(key)}`} aria-current={page === key ? "step" : undefined} onClick={() => go(key)}>
         <b>{stepState(key) === "done" ? <Icon name="check" size={16} /> : n + 1}</b><span>{label}</span>
         {key === "checking" && active > 0 && <em>{active}</em>}{key === "review" && ready.length > 0 && <em>{ready.length}</em>}
       </button>)}
-      <button className={`mp-step mp-step-finished ${page === "finished" ? "on" : ""}`} aria-current={page === "finished" ? "page" : undefined} onClick={() => go("finished")}><b><Icon name="list" size={16} /></b><span>Finished</span></button>
+      <button className={`mp-step mp-step-finished ${page === "finished" ? "on" : ""}`} aria-current={page === "finished" ? "page" : undefined} onClick={() => go("finished")}><b><Icon name="list" size={16} /></b><span>Finished</span>{finished.length > 0 && <em>{finished.length}</em>}</button>
     </nav>
+    </header>
     <div className="mp-feedback">
       {error && <div role="alert" className="mp-alert tone-bad"><Icon name="cross" size={20} />{error}</div>}
       {message && <div role="status" className="mp-alert tone-ok"><Icon name="check" size={20} />{message}</div>}
-      {busy && !message && <div role="status" className="mp-alert tone-info"><Icon name="spinner" size={20} />Please wait…</div>}
+      {busy && !message && !uploading && <div role="status" className="mp-alert tone-info"><Icon name="spinner" size={20} />Please wait…</div>}
     </div>
 
     <main className="mp-main">
       {page === "home" && <>
-        <h1>What would you like to do?</h1>
-        <div className="mp-tiles">
-          <section className="mp-tile"><span className="mp-tile-icon"><Icon name="upload" size={28} /></span><h2>Add videos</h2><p>Pick video files from this computer. The app checks them for you.</p><button className="mp-btn primary" onClick={() => go("add")}>Add videos</button></section>
-          <section className="mp-tile"><span className="mp-tile-icon tone-warn"><Icon name="clock" size={28} /></span>
-            <h2>{ready.length === 0 ? "Nothing to review yet" : ready.length === 1 ? "1 video is ready for you" : `${ready.length} videos are ready for you`}</h2>
-            <p>{ready.length ? "The app has finished. Please watch them and give your answer." : active ? `The app is still checking ${active === 1 ? "1 video" : `${active} videos`}.` : "Add a video first. It will show up here when the app has finished checking it."}</p>
-            <button className="mp-btn secondary" disabled={!ready.length || busy} onClick={() => openItem(ready[0].item_id)}>Start reviewing</button></section>
+        <div className="mp-hero">
+          <h1>Check footage for violence</h1>
+          <p className="mp-lead">Add a video. The app marks the moments where it sees violence, and you decide whether it got it right.</p>
+        </div>
+        <div className="mp-home">
+          {dropzone}
+          <aside className="mp-waiting" aria-labelledby="mp-waiting-title">
+            <h2 id="mp-waiting-title">Waiting for your review</h2>
+            <p className="mp-waiting-count"><strong>{ready.length}</strong><span>{ready.length === 1 ? "video is ready" : "videos are ready"}</span></p>
+            {ready.length > 0 ? <ul className="mp-mini">{ready.slice(0, 3).map(r => <li key={r.item_id}><button onClick={() => openItem(r.item_id)} disabled={busy}>{thumb}<span>{clipName(r.clip_id)}</span></button></li>)}</ul>
+              : <p className="mp-hint">{active ? `The app is still checking ${active === 1 ? "1 video" : `${active} videos`}. They appear here when it has finished.` : "Videos appear here once the app has checked them."}</p>}
+            {ready.length > 3 && <p className="mp-hint">and {ready.length - 3} more</p>}
+            <button className="mp-btn primary" disabled={!ready.length || busy} onClick={() => openItem(ready[0].item_id)}>Start reviewing</button>
+            {active > 0 && ready.length > 0 && <p className="mp-checking-note"><Icon name="spinner" size={16} />Still checking {active === 1 ? "1 more video" : `${active} more videos`}</p>}
+          </aside>
         </div>
         <p className="mp-note">This tool helps people review footage. It can be wrong, and it never decides who is guilty. A person always makes the final call.</p>
       </>}
 
       {page === "add" && <>
         <h1>Add videos</h1>
-        <div className={`mp-drop ${dragging ? "dragging" : ""}`} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); addVideos(Array.from(e.dataTransfer.files)); }}>
-          <Icon name="upload" size={44} />
-          <p><strong>Drag video files here</strong><br />or</p>
-          <button className="mp-btn primary" disabled={busy} onClick={() => fileInput.current?.click()}>Choose videos</button>
-          <input ref={fileInput} type="file" multiple accept={videoTypes} hidden onChange={e => { addVideos(Array.from(e.target.files)); e.target.value = ""; }} />
-          <p className="mp-hint">MP4, MOV, AVI, MKV and WEBM files work. The app starts checking as soon as they are added.</p>
-        </div>
-        {clips.some(c => c.status === "available") && <section className="mp-group"><h2>Videos already on this computer</h2>
-          <ul className="mp-list">{clips.filter(c => c.status === "available").map(c => <li key={c.clip_id} className="mp-row"><span className="mp-row-name">{clipName(c.clip_id)}<small>{clockText(c.metadata.duration)} long</small></span><button className="mp-btn secondary small" disabled={busy} onClick={() => checkClip(c.clip_id)}>Check this video</button></li>)}</ul>
+        {dropzone}
+        {uploads.length > 0 && <section className="mp-group" aria-live="polite">
+          <div className="mp-group-head">
+            <h2>{uploading ? "Adding videos" : "Just added"}</h2>
+            {!uploading && <span className="mp-row-tools"><button className="mp-btn primary small" onClick={() => go("checking")}>See checking progress</button><button className="mp-btn quiet small" onClick={() => setUploads([])}>Clear this list</button></span>}
+          </div>
+          <ul className="mp-list">{uploads.map(u => <li key={u.key} className={`mp-upload is-${u.state}`}>
+            {thumb}
+            <span className="mp-upload-body">
+              <span className="mp-upload-name">{u.name}</span>
+              <span className="mp-upload-meta"><span>{sizeText(u.size)}</span><span className="mp-upload-state">{u.state === "waiting" ? "Waiting" : u.state === "uploading" ? `Uploading ${Math.round(u.progress * 100)}%` : u.state === "done" ? "Added, checking has started" : u.error}</span></span>
+              {["waiting", "uploading"].includes(u.state) && <span className="mp-progress" role="progressbar" aria-label={`Uploading ${u.name}`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(u.progress * 100)}><i style={{ width: `${u.progress * 100}%` }} /></span>}
+            </span>
+            <span className={`mp-upload-icon tone-${u.state === "done" ? "ok" : u.state === "failed" ? "bad" : "info"}`}><Icon name={u.state === "done" ? "check" : u.state === "failed" ? "cross" : "spinner"} size={18} /></span>
+          </li>)}</ul>
+        </section>}
+        {available.length > 0 && <section className="mp-group">
+          <div className="mp-group-head">
+            <h2>Your videos <span className="mp-count">{available.length}</span></h2>
+            {removable.length > 1 && (confirm === "all" ? <span className="mp-confirm" role="group" aria-label="Confirm removing all videos">
+              <span>Remove {removable.length} videos?</span>
+              <button className="mp-btn danger small" disabled={busy} onClick={() => removeClips(removable.map(c => c.clip_id))}><Icon name="trash" size={18} />Yes, remove all</button>
+              <button className="mp-btn quiet small" onClick={() => setConfirm(null)}>Cancel</button>
+            </span> : <button className="mp-btn quiet small" disabled={busy} onClick={() => setConfirm("all")}><Icon name="trash" size={18} />Remove all</button>)}
+          </div>
+          <p className="mp-hint">Removing a video deletes the file from this app's storage. Answers you already saved stay in Finished. You can add the same video again later.</p>
+          <ul className="mp-list">{available.map(c => <li key={c.clip_id} className="mp-row">{thumb}<span className="mp-row-name">{clipName(c.clip_id)}<small>{clockText(c.metadata.duration)} long</small></span><span className="mp-row-tools"><button className="mp-btn secondary small" disabled={busy || checkingIds.has(c.clip_id)} onClick={() => checkClip(c.clip_id)}>{checkingIds.has(c.clip_id) ? "Being checked" : "Check this video"}</button>{removeControl(c.clip_id)}</span></li>)}</ul>
         </section>}
       </>}
 
@@ -227,34 +330,46 @@ export default function Municipal({ Legacy, Timeline }) {
         <h1>Checking</h1>
         <p className="mp-lead">{active ? "The app checks one video at a time. You can leave this page open, or come back later." : items.length ? "All videos have been checked." : "Nothing is being checked right now."}</p>
         {!items.length ? <div className="mp-empty"><p>No videos have been added yet.</p><button className="mp-btn primary" onClick={() => go("add")}>Add videos</button></div> :
-          <ul className="mp-list">{items.map(i => <li key={i.item_id} className="mp-row">
-            <span className="mp-row-name">{clipName(i.clip_id)}<small>Added {new Date(i.job.created_at).toLocaleString()}</small></span>
+          <ul className="mp-list">{items.map(i => <li key={i.item_id} className={`mp-row ${i.status === "running" ? "is-running" : ""}`}>
+            {thumb}<span className="mp-row-name">{clipName(i.clip_id)}<small>Added {new Date(i.job.created_at).toLocaleString()}</small></span>
             <span className="mp-row-tools"><Badge status={itemStatus(i.status, reviewedItems.has(i.item_id))} />
               {i.status === "completed" && <button className="mp-btn primary small" disabled={busy} onClick={() => openItem(i.item_id)}>{reviewedItems.has(i.item_id) ? "Open again" : "Watch and review"}</button>}
               {["failed", "cancelled"].includes(i.status) && <button className="mp-btn secondary small" disabled={busy} onClick={() => action(async () => { await post(`/jobs/${i.job.job_id}/retry`, { idempotency_key: uid() }); setMessage("Trying again."); })}>Try again</button>}
               {["queued", "running"].includes(i.status) && <button className="mp-btn quiet small" disabled={busy} onClick={() => action(async () => { await post(`/jobs/${i.job.job_id}/cancel`); setMessage("Stopping. The video being checked right now will finish first."); })}>Stop</button>}
+              {!["queued", "running"].includes(i.status) && removeControl(i.clip_id)}
             </span></li>)}</ul>}
       </>}
 
       {page === "review" && (!item ? <>
         <h1>Your review</h1>
         {!ready.length ? <div className="mp-empty"><p>There are no videos waiting for your answer.</p><button className="mp-btn primary" onClick={() => go(active ? "checking" : "add")}>{active ? "See what's being checked" : "Add videos"}</button></div> :
-          <ul className="mp-list">{ready.map(r => <li key={r.item_id} className="mp-row"><span className="mp-row-name">{clipName(r.clip_id)}</span><button className="mp-btn primary small" disabled={busy} onClick={() => openItem(r.item_id)}>Watch and review</button></li>)}</ul>}
+          <ul className="mp-list">{ready.map(r => <li key={r.item_id} className="mp-row">{thumb}<span className="mp-row-name">{clipName(r.clip_id)}</span><button className="mp-btn primary small" disabled={busy} onClick={() => openItem(r.item_id)}>Watch and review</button></li>)}</ul>}
       </> : <>
         <h1>{clipName(item.clip_id)}</h1>
         <div className="mp-review">
           <section className="mp-watch">
-            <video key={item.item_id} ref={video} src={item.video_url} controls onTimeUpdate={e => setCurrent(e.currentTarget.currentTime)} />
-            <div className="mp-track" aria-hidden="true">{moments.map(([a, b], n) => <span key={n} style={{ left: `${(a / duration) * 100}%`, width: `${Math.max(1, ((b - a) / duration) * 100)}%` }} />)}<i style={{ left: `${Math.min(100, (current / duration) * 100)}%` }} /></div>
-            <p className={`mp-finding tone-${finding.tone}`}>{finding.text}</p>
-            {moments.length > 0 && <><p className="mp-hint">The orange marks on the bar show where. Press a button to watch that part.</p>
-              <div className="mp-moments">{moments.map(([a], n) => <button key={n} className="mp-btn secondary small" onClick={() => seek(a, true)}><Icon name="play" size={16} />Watch moment {n + 1} · {clockText(a)}</button>)}</div></>}
+            <div className="mp-monitor">
+              <video key={item.item_id} ref={video} src={item.video_url} controls onTimeUpdate={e => setCurrent(e.currentTarget.currentTime)} />
+              <div className="mp-scrub">
+                <span className="mp-time">{clockText(current)}</span>
+                <div className="mp-track" aria-hidden="true">{moments.map(([a, b], n) => <span key={n} style={{ left: `${(a / duration) * 100}%`, width: `${Math.max(1, ((b - a) / duration) * 100)}%` }} />)}<i style={{ left: `${Math.min(100, (current / duration) * 100)}%` }} /></div>
+                <span className="mp-time">{clockText(duration)}</span>
+              </div>
+            </div>
+            <div className={`mp-verdict tone-${finding.tone}`}>
+              <span className="mp-verdict-icon"><Icon name={verdict.state === "violence" ? "alert" : verdict.state === "non_violence" ? "shield" : "question"} size={26} /></span>
+              <div className="mp-verdict-text"><h2>{verdictTitle}</h2><p>{finding.text}</p></div>
+              {verdict.score !== null && <div className="mp-verdict-score"><strong>{verdict.score.toFixed(2)}</strong><span>highest score</span><span>flags at {verdict.threshold.toFixed(2)}</span></div>}
+            </div>
+            {moments.length > 0 && <><p className="mp-hint">The amber marks on the bar show where. Press a button to watch that part.</p>
+              <div className="mp-moments">{moments.map(([a, b], n) => <button key={n} className="mp-btn secondary small" onClick={() => seek(a, true)}><Icon name="play" size={16} />Watch {clockText(a)} to {clockText(b)}</button>)}</div></>}
+            <div className="mp-review-remove">{removeControl(item.clip_id)}</div>
           </section>
           <section className="mp-ask">
             {saved ? <>
               <p className="mp-question">Thank you. Your answer is saved.</p>
               <p>You said: <strong>{decisionLabel(item.reviews.at(-1)?.decision)}</strong></p>
-              {nextReady ? <button className="mp-btn primary" disabled={busy} onClick={() => openItem(nextReady.item_id)}>Review the next video<Icon name="arrow" size={20} /></button> : <button className="mp-btn primary" onClick={() => go("finished")}>See finished videos</button>}
+              {nextReady ? <button className="mp-btn primary" disabled={busy} onClick={() => openItem(nextReady.item_id)}>Review the next video</button> : <button className="mp-btn primary" onClick={() => go("finished")}>See finished videos</button>}
               <button className="mp-btn quiet" onClick={() => setSaved(false)}>Change my answer</button>
             </> : <>
               <p className="mp-question" id="mp-question">Did the app get this right?</p>
@@ -267,7 +382,7 @@ export default function Municipal({ Legacy, Timeline }) {
                 <button className="mp-btn secondary small" onClick={() => { if (markStart === null) setMarkStart(current); else { setMarks([...marks, [Math.min(markStart, current), Math.max(markStart, current)]]); setMarkStart(null); } }}>{markStart === null ? `Mark where it starts (${clockText(current)})` : `Mark where it ends (${clockText(current)})`}</button>
                 {marks.length > 0 && <ul className="mp-marks">{marks.map(([a, b], n) => <li key={n}>{clockText(a)} to {clockText(b)}<button className="mp-link" onClick={() => setMarks(marks.filter((_, k) => k !== n))}>Remove</button></li>)}</ul>}
               </details>
-              {reviewer && !editingName ? <p className="mp-hint">Answering as <strong>{reviewer}</strong> · <button className="mp-link" onClick={() => setEditingName(true)}>Change</button></p> :
+              {reviewer && !editingName ? <p className="mp-hint">Answering as <strong>{reviewer}</strong> <button className="mp-link" onClick={() => setEditingName(true)}>Change</button></p> :
                 <div className="mp-field"><label htmlFor="mp-reviewer">Your name</label><input id="mp-reviewer" maxLength="200" value={reviewer} onChange={e => setReviewer(e.target.value)} autoComplete="name" /></div>}
               <button className="mp-btn primary" disabled={busy} onClick={saveReview}>Save my answer</button>
             </>}
@@ -275,9 +390,9 @@ export default function Municipal({ Legacy, Timeline }) {
         </div>
         <details className="mp-technical-item"><summary>Technical details for this video</summary>
           <div className="mp-technical-body">
-            <section className="panel mp-section"><div className="mp-actions"><span>Mode: <strong>{result?.execution_mode || item.status}</strong></span><span>Inference: {result?.timings.total_seconds?.toFixed(2) ?? "—"}s</span><span>Behavior: {result?.final_alert.behavior || "Abstained / not examined"}</span></div><p>{result?.final_alert.reason}</p><p>{item.clip.spec.source}</p></section>
+            <section className="panel mp-section"><div className="mp-actions"><span>Mode: <strong>{result?.execution_mode || item.status}</strong></span><span>Inference: {result?.timings.total_seconds?.toFixed(2) ?? "—"}s</span><span>Answer: <strong>{verdictLabel(violenceVerdict(result).state)}</strong></span><span>Violence score: {metricText(violenceVerdict(result).score)} (flag at {metricText(violenceVerdict(result).threshold)})</span></div><p>{item.clip.spec.source}</p></section>
             <div className="mp-legacy"><Timeline result={result} current={current} onSeek={seek} /></div>
-            <section className="panel mp-section"><h2>Routed windows and actor evidence</h2>{!windows.length && <p>No windows routed. Behavior was not examined.</p>}{windows.map((w, i) => <article className="mp-window" key={i}><button onClick={() => seek(w.interval[0])}>{w.interval.map(t => t.toFixed(2)).join("–")} seconds</button><p>{w.actor_count} actors · {w.predicted_behavior || "Behavior unavailable"} · {w.model_disagreement ? "Models disagree" : w.status}</p>{w.probabilities && <div className="mp-probabilities">{result.behavior.classes.map((c, k) => <label key={c}>{c}: {metricText(w.probabilities[k])}<meter min="0" max="1" value={w.probabilities[k]} /></label>)}</div>}<p className="muted">Uncalibrated class outputs; these are not validated risk probabilities.</p></article>)}<div className="mp-overlays">{item.overlays.map(o => <figure key={o.url}><img src={o.url} alt={o.caption} /><figcaption>{o.caption} · boxes apply to this frame only</figcaption></figure>)}</div><details><summary>Frozen hashes, timings and raw model evidence</summary><pre>{pretty(result)}</pre></details></section>
+            <section className="panel mp-section"><h2>Violence score over time</h2>{!result?.indian_pilot?.windows?.length ? <p>{result?.indian_pilot ? "One score for the whole video." : "The violence model is not loaded."}</p> : <div className="mp-scroll"><table><thead><tr><th>Time</th><th>Violence score</th><th>Answer</th></tr></thead><tbody>{result.indian_pilot.windows.map((w, i) => <tr key={i}><td><button className="mp-link" onClick={() => seek(w.start_sec)}>{clockText(w.start_sec)}–{clockText(w.end_sec)}</button></td><td>{metricText(w.violence_score)}</td><td>{w.above_threshold ? "Violence" : "Non-violence"}</td></tr>)}</tbody></table></div>}<p className="muted">Scores come from the violence / non-violence model only. Scores are uncalibrated.</p><details><summary>Frozen hashes, timings and raw model evidence</summary><pre>{pretty({ ...result, behavior: undefined, final_alert: undefined })}</pre></details></section>
             <section className="panel mp-section"><h2>Verified reference and history</h2><p>The verified reference can be revealed only after a review is saved. Reviews are operator feedback and do not become ground truth.</p><div className="mp-actions"><button disabled={busy || !item.reviews.length} onClick={() => action(async () => setReference(await request(`/items/${item.item_id}/reference`)))}>Reveal verified reference after review</button><a href={`${base}/export?item_id=${item.item_id}&format=json&${exportQuery}`} download>Export this clip result</a></div>{reference !== undefined && <pre>{reference ? pretty(reference) : "No verified reference supplied."}</pre>}<details><summary>Review history ({item.reviews.length})</summary><pre>{pretty(item.reviews)}</pre></details></section>
           </div>
         </details>
@@ -288,8 +403,8 @@ export default function Municipal({ Legacy, Timeline }) {
         {!finished.length ? <div className="mp-empty"><p>No answers saved yet. Videos you review will be listed here.</p></div> : <>
           <div className="mp-toolbar no-print"><a className="mp-btn secondary small" href={`${base}/export?format=csv&${exportQuery}`} download>Save as spreadsheet</a><button className="mp-btn quiet small" onClick={() => window.print()}>Print this list</button></div>
           <ul className="mp-list">{finished.map(r => { const answer = decisions.find(d => d.value === r.review_decision); return <li key={r.item_id} className="mp-row">
-            <span className="mp-row-name">{clipName(r.clip_id)}<small>{r.reviews.at(-1)?.reviewer ? `Answered by ${r.reviews.at(-1).reviewer}` : "Answered"}</small></span>
-            <span className="mp-row-tools"><span className={`mp-badge tone-${answer?.tone || "muted"}`}><Icon name={answer?.icon || "check"} size={16} />{decisionLabel(r.review_decision)}</span><button className="mp-btn quiet small no-print" disabled={busy} onClick={() => openItem(r.item_id)}>Open</button></span>
+            {thumb}<span className="mp-row-name">{clipName(r.clip_id)}<small>{r.reviews.at(-1)?.reviewer ? `Answered by ${r.reviews.at(-1).reviewer}` : "Answered"}</small></span>
+            <span className="mp-row-tools"><span className={`mp-badge tone-${answer?.tone || "muted"}`}><Icon name={answer?.icon || "check"} size={16} />{decisionLabel(r.review_decision)}</span>{removed.has(r.clip_id) ? <span className="mp-hint mp-inline">Video removed</span> : <button className="mp-btn quiet small no-print" disabled={busy} onClick={() => openItem(r.item_id)}>Open</button>}</span>
           </li>; })}</ul>
         </>}
       </>}
@@ -310,9 +425,9 @@ export default function Municipal({ Legacy, Timeline }) {
           <div className="mp-actions"><button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 100))}>Previous</button><span>{offset + 1}–{Math.min(total, offset + 100)} of {total}</span><button disabled={offset + 100 >= total} onClick={() => setOffset(offset + 100)}>Next</button></div>
         </section>}
         {technical === "Processing queue" && <section className="panel mp-section"><h2>Processing queue</h2><p>One GPU inference at a time. Cancellation finishes the active clip and stops the remaining clips. Interrupted work resumes within its retry budget.</p>{!jobs.length && <p className="mp-empty">No batches submitted yet.</p>}{jobs.map(j => <article className="mp-job" key={j.job_id}><div className="mp-actions"><strong>{j.status}</strong><code>{j.job_id}</code><span>{j.created_at}</span><button disabled={busy || !["queued", "running"].includes(j.status)} onClick={() => action(() => post(`/jobs/${j.job_id}/cancel`))}>Cancel pending clips</button><button disabled={busy || !j.items.some(i => ["failed", "cancelled"].includes(i.status))} onClick={() => action(() => post(`/jobs/${j.job_id}/retry`, { idempotency_key: uid() }))}>Retry failed / cancelled</button></div><progress value={j.progress} max="1" aria-label="Completed clips" /><p>{j.items.filter(i => ["completed", "failed", "cancelled"].includes(i.status)).length} / {j.items.length} clips finished</p><div className="mp-scroll"><table><thead><tr><th>Clip</th><th>Status</th><th>Attempts</th><th>Evidence / error</th></tr></thead><tbody>{j.items.map(i => <tr key={i.item_id}><td>{i.clip_id}</td><td>{i.status}</td><td>{i.attempts}</td><td>{i.status === "completed" ? <button onClick={() => openItem(i.item_id)}>Analyze & review</button> : i.error || "Awaiting execution"}</td></tr>)}</tbody></table></div></article>)}</section>}
-        {technical === "Results & exports" && <section className="panel mp-section"><h2>Results and operator feedback</h2><p>Exports omit raw videos and actor imagery. External handover excludes records without explicit redistribution permission. Reference labels are opt-in.</p><div className="mp-actions no-print"><label><input type="checkbox" checked={includeReferences} onChange={e => setIncludeReferences(e.target.checked)} /> Include legitimate verified references</label><label><input type="checkbox" checked={external} onChange={e => setExternal(e.target.checked)} /> External handover rights filter</label><a href={`${base}/export?format=json&${exportQuery}`} download>Download JSON</a><a href={`${base}/export?format=csv&${exportQuery}`} download>Download CSV</a><button onClick={() => window.print()}>Print report / save PDF</button></div><div className="mp-scroll"><table><thead><tr><th>Clip / population</th><th>Status / execution</th><th>Prediction</th><th>Feedback / error examples</th><th>Evidence</th></tr></thead><tbody>{results.map(r => <tr key={r.item_id}><td>{r.clip_id}<p>{r.population} · {r.source}</p></td><td>{r.status}<p>{r.execution_mode || "No inference result"}</p></td><td>{r.predicted_class || "Abstained / not examined"}</td><td>{r.review_decision || "Unreviewed"}<p>{r.reviewer_notes || r.failure_reason || r.abstention_reason}</p></td><td><button onClick={() => openItem(r.item_id)}>Open</button></td></tr>)}</tbody></table></div></section>}
+        {technical === "Results & exports" && <section className="panel mp-section"><h2>Results and operator feedback</h2><p>Exports omit raw videos and actor imagery. External handover excludes records without explicit redistribution permission. Reference labels are opt-in.</p><div className="mp-actions no-print"><label><input type="checkbox" checked={includeReferences} onChange={e => setIncludeReferences(e.target.checked)} /> Include legitimate verified references</label><label><input type="checkbox" checked={external} onChange={e => setExternal(e.target.checked)} /> External handover rights filter</label><a href={`${base}/export?format=json&${exportQuery}`} download>Download JSON</a><a href={`${base}/export?format=csv&${exportQuery}`} download>Download CSV</a><button onClick={() => window.print()}>Print report / save PDF</button></div><div className="mp-scroll"><table><thead><tr><th>Clip / population</th><th>Status / execution</th><th>Prediction</th><th>Feedback / error examples</th><th>Evidence</th></tr></thead><tbody>{results.map(r => <tr key={r.item_id}><td>{r.clip_id}<p>{r.population} · {r.source}</p></td><td>{r.status}<p>{r.execution_mode || "No inference result"}</p></td><td>{r.violence_answer ? verdictLabel(r.violence_answer) : "No violence score"}</td><td>{r.review_decision || "Unreviewed"}<p>{r.reviewer_notes || r.failure_reason || r.abstention_reason}</p></td><td><button onClick={() => openItem(r.item_id)}>Open</button></td></tr>)}</tbody></table></div></section>}
       </>}
     </main>
-    <footer className="mp-footer no-print"><button className="mp-link" onClick={() => go(page === "technical" ? "home" : "technical")}>{page === "technical" ? "Back to the main screens" : "Technical details"}</button><span>Sultani et al. CVPR 2018 · Gavrilyuk et al. CVPR 2020 · Local research evaluation only</span></footer>
+    <footer className="mp-footer no-print"><button className="mp-link" onClick={() => go(page === "technical" ? "home" : "technical")}>{page === "technical" ? "Back to the main screens" : "Technical details"}</button><span>Research prototype for human review. Runs on this computer only.</span></footer>
   </div>;
 }

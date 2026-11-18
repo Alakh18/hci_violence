@@ -53,6 +53,14 @@ def predicted_class(result):
     return result.get("final_alert", {}).get("behavior") if result else None
 
 
+def violence_answer(result):
+    """'violence' / 'non_violence' from the binary violence head, or None if not loaded."""
+    pilot = (result or {}).get("indian_pilot")
+    if not pilot:
+        return None, None
+    return ("violence" if pilot["flagged"] else "non_violence"), pilot["violence_score"]
+
+
 def class_metrics(pairs, labels):
     per_class = {}
     for label in labels:
@@ -220,6 +228,8 @@ def export_rows(catalog, *, references=False, external=False):
             job_id=row["job_id"],
             status=row["status"],
             predicted_class=predicted_class(result),
+            violence_answer=violence_answer(result)[0],
+            violence_score=violence_answer(result)[1],
             execution_mode=result.get("execution_mode"),
             anomaly_scores=result.get("anomaly", {}).get("segment_scores"),
             review_decision=latest_review.get("decision"),
@@ -259,7 +269,8 @@ def csv_export(payload):
         "item_id",
         "job_id",
         "status",
-        "predicted_class",
+        "violence_answer",
+        "violence_score",
         "execution_mode",
         "anomaly_scores",
         "review_decision",
@@ -269,7 +280,6 @@ def csv_export(payload):
         "inference_seconds",
         "profile",
         "failure_reason",
-        "abstention_reason",
     ]
     if any("reference" in row for row in payload["records"]):
         columns.append("reference")

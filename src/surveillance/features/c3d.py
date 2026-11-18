@@ -152,4 +152,9 @@ class C3DExtractor:
             outputs.append(self.model(torch.stack(batch).to(self.device)).cpu().numpy())
             timings["c3d_seconds"] += time.perf_counter() - started
         self.last_timings = timings
-        return aggregate_segments(np.concatenate(outputs), num_segments)
+        units = np.concatenate(outputs)
+        # Raw per-16-frame FC6 units, kept so add-on heads can score short windows
+        # the way they were trained (2 s clips) instead of one whole-video average.
+        self.last_units = units
+        self.last_fps = metadata.fps
+        return aggregate_segments(units, num_segments)

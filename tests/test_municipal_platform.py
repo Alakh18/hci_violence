@@ -283,6 +283,8 @@ def test_metric_population_and_exports(catalog):
     assert "reference" not in payload["records"][0]
     assert "video_path" not in json.dumps(payload)
     assert "'=HYPERLINK" in csv_export(payload)
+    header = csv_export(payload).splitlines()[0].split(",")
+    assert "violence_answer" in header and "predicted_class" not in header
     assert export_rows(catalog, external=True)["records"] == []
     assert export_rows(catalog, external=True)["excluded_rights"] == 4
     assert export_rows(catalog, references=True)["records"][0]["reference"]["version"] == 1
@@ -384,6 +386,11 @@ def test_owned_upload_retention_and_active_job_protection(catalog):
     assert catalog.clip(clip_id)["status"] == "deleted"
     with pytest.raises(ValueError, match="unavailable"):
         queue.submit([clip_id], "deleted")
+    again = catalog.uploads / "again.avi"
+    again.write_bytes((catalog.import_root / spec["file_path"]).read_bytes())
+    assert catalog.add_upload(again) == clip_id
+    assert catalog.clip(clip_id)["status"] == "available"
+    assert not again.exists() and path.exists()  # restored at its original stored path
 
 
 def test_worker_process_ownership(catalog):

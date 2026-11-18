@@ -2,15 +2,14 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import Municipal from "./Municipal.jsx";
+import {
+  describeFinding,
+  flaggedMoments,
+  timelineSeries,
+  verdictLabel,
+  violenceVerdict,
+} from "./platform-utils.js";
 
-const classes = [
-  "Normal",
-  "Abuse",
-  "Assault",
-  "Fighting",
-  "Robbery",
-  "Vandalism",
-];
 const modes = [
   {
     id: "verified",
@@ -93,25 +92,34 @@ function Icon({ name, size = 18 }) {
 }
 function Timeline({ result, current, onSeek }) {
   const [hover, setHover] = useState(null);
-  const anomaly = result?.anomaly;
-  const duration = anomaly?.metadata.duration_sec || 1;
-  const threshold = result?.policy.anomaly_threshold ?? 0.5;
-  const x = (t) => 46 + (t / duration) * 846;
+  const series = timelineSeries(result);
+  const violence = series?.kind === "violence";
+  const pts = series?.points || [];
+  const duration = Math.max(
+    result?.anomaly?.metadata.duration_sec || 0,
+    pts.length ? pts[pts.length - 1].end : 0,
+  ) || 1;
+  const threshold = series?.threshold ?? 0.5;
+  const x = (t) => 46 + (Math.min(t, duration) / duration) * 846;
   const y = (score) => 132 - score * 105;
-  const points = anomaly?.segment_scores
-    .map(
-      (score, i) =>
-        `${x((anomaly.timestamps[i][0] + anomaly.timestamps[i][1]) / 2)},${y(score)}`,
-    )
-    .join(" ");
+  const mid = (p) => (p.start + p.end) / 2;
+  const points = pts.map((p) => `${x(mid(p))},${y(p.score)}`).join(" ");
+  // Hover/click zones: from one point's start to the next point's start, so the
+  // overlapping 2 s windows (1 s apart) do not stack on top of each other.
+  const zoneEnd = (i) => (i + 1 < pts.length ? pts[i + 1].start : pts[i].end);
+  const spanText = (p) => `${clock(p.start)}–${clock(p.end)}`;
   return (
     <section className="panel timeline-panel">
       <div className="panel-heading">
         <h2>
           <Icon name="chart" />
-          Anomaly timeline
+          {violence ? "Violence score timeline" : "Anomaly timeline"}
         </h2>
-        <span className="muted">Sultani · 32 segments</span>
+        <span className="muted">
+          {violence
+            ? `${pts.length} two-second windows`
+            : "Sultani · 32 segments"}
+        </span>
       </div>
       <div className="chart-wrap">
         <svg
@@ -119,9 +127,11 @@ function Timeline({ result, current, onSeek }) {
           className="timeline"
           role="img"
           aria-label={
-            anomaly
-              ? "Anomaly scores over video time; dashed line is the frozen routing threshold"
-              : "Anomaly timeline awaiting inference"
+            series
+              ? violence
+                ? "Violence score per two-second window; dashed line is the violence threshold"
+                : "Anomaly scores over video time; dashed line is the frozen routing threshold"
+              : "Timeline awaiting inference"
           }
         >
           {[0, 0.25, 0.5, 0.75, 1].map((v) => (
@@ -132,6 +142,16 @@ function Timeline({ result, current, onSeek }) {
               </text>
             </g>
           ))}
+          {flaggedMoments(result).map(([start, end], i) => (
+            <rect
+              key={i}
+              x={x(start)}
+              y="22"
+              width={Math.max(2, x(end) - x(start))}
+              height="110"
+              className="window-highlight"
+            />
+          ))}
           <line
             x1="46"
             x2="892"
@@ -139,23 +159,25 @@ function Timeline({ result, current, onSeek }) {
             y2={y(threshold)}
             className="threshold"
           />
-          {result?.behavior.windows.map((w, i) => (
-            <rect
-              key={i}
-              x={x(w.interval[0])}
-              y="22"
-              width={Math.max(2, x(w.interval[1]) - x(w.interval[0]))}
-              height="110"
-              className="window-highlight"
-            />
-          ))}
-          {anomaly && (
+          {series && (
             <>
               <polygon
-                points={`46,132 ${points} 892,132`}
+                points={`${x(mid(pts[0]))},132 ${points} ${x(mid(pts[pts.length - 1]))},132`}
                 className="chart-area"
               />
               <polyline points={points} className="score-line" />
+              {violence &&
+                pts.map((p, i) => (
+                  <circle
+                    key={i}
+                    cx={x(mid(p))}
+                    cy={y(p.score)}
+                    r="3"
+                    className={
+                      "chart-dot" + (p.score >= threshold ? " above" : "")
+                    }
+                  />
+                ))}
               <line
                 x1={x(current)}
                 x2={x(current)}
@@ -163,32 +185,26 @@ function Timeline({ result, current, onSeek }) {
                 y2="132"
                 className="playhead"
               />
-              {anomaly.segment_scores.map((score, i) => (
+              {pts.map((p, i) => (
                 <g
                   key={i}
                   onMouseEnter={() => setHover(i)}
                   onMouseLeave={() => setHover(null)}
-                  onClick={() => onSeek(anomaly.timestamps[i][0])}
+                  onClick={() => onSeek(p.start)}
                   style={{ cursor: "pointer" }}
                 >
                   <rect
-                    x={x(anomaly.timestamps[i][0])}
+                    x={x(p.start)}
                     y="20"
-                    width={Math.max(
-                      4,
-                      x(anomaly.timestamps[i][1]) - x(anomaly.timestamps[i][0]),
-                    )}
+                    width={Math.max(4, x(zoneEnd(i)) - x(p.start))}
                     height="113"
                     fill="transparent"
                   />
                   {hover === i && (
                     <circle
-                      cx={x(
-                        (anomaly.timestamps[i][0] + anomaly.timestamps[i][1]) /
-                          2,
-                      )}
-                      cy={y(score)}
-                      r="4"
+                      cx={x(mid(p))}
+                      cy={y(p.score)}
+                      r="5"
                       className="chart-dot"
                     />
                   )}
@@ -198,10 +214,10 @@ function Timeline({ result, current, onSeek }) {
           )}
           {[0, 1, 2, 3, 4].map((i) => (
             <text key={i} x={46 + i * 211.5} y="157" textAnchor="middle">
-              {anomaly ? clock((duration * i) / 4) : "—"}
+              {series ? clock((duration * i) / 4) : "—"}
             </text>
           ))}
-          {!anomaly && (
+          {!series && (
             <text x="469" y="88" textAnchor="middle" className="chart-empty">
               Scores appear after analysis
             </text>
@@ -210,35 +226,40 @@ function Timeline({ result, current, onSeek }) {
         <div className="chart-legend">
           <span>
             <i className="teal-dot" />
-            Anomaly score
+            {violence ? "Violence score" : "Anomaly score"}
           </span>
           <span>
             <i className="amber-line" />
-            Fixed threshold {threshold.toFixed(2)}
+            {violence ? "Violence threshold" : "Fixed threshold"}{" "}
+            {threshold.toFixed(2)}
           </span>
           <span>
             <i className="window-dot" />
-            Analyzed interval
+            Violence flagged
           </span>
           <span className="chart-readout">
-            {hover === null
-              ? "Click an interval to seek"
-              : `Segment ${hover + 1} · ${number(anomaly.segment_scores[hover])}`}
+            {hover === null || !pts[hover]
+              ? "Click a point to seek"
+              : violence
+                ? `${spanText(pts[hover])} · ${number(pts[hover].score)}`
+                : `Segment ${hover + 1} · ${number(pts[hover].score)}`}
           </span>
         </div>
       </div>
-      {anomaly && (
+      {series && (
         <details className="score-data">
-          <summary>Inspect segment values</summary>
+          <summary>
+            {violence ? "Inspect window values" : "Inspect segment values"}
+          </summary>
           <div className="segment-data">
-            {anomaly.segment_scores.map((v, i) => (
+            {pts.map((p, i) => (
               <button
                 key={i}
-                onClick={() => onSeek(anomaly.timestamps[i][0])}
-                aria-label={`Seek segment ${i + 1}, score ${number(v)}`}
+                onClick={() => onSeek(p.start)}
+                aria-label={`Seek ${spanText(p)}, score ${number(p.score)}`}
               >
-                <span>{String(i + 1).padStart(2, "0")}</span>
-                {number(v)}
+                <span>{violence ? clock(p.start) : String(i + 1).padStart(2, "0")}</span>
+                {number(p.score)}
               </button>
             ))}
           </div>
@@ -270,31 +291,19 @@ function App() {
     .filter(([, v]) => !v)
     .map(([k]) => k.replace("_checkpoint", ""));
   const source = mode === "live" ? uploaded?.video_url : selected?.video_url;
-  const covered =
-    result?.behavior.windows.filter((w) => w.status === "available") || [];
-  const chosen =
-    covered.find(
-      (w) =>
-        JSON.stringify(w.interval) ===
-        JSON.stringify(result?.final_alert.timestamp_interval),
-    ) || covered[0];
-  const probabilities = chosen?.probabilities;
+  const verdict = violenceVerdict(result);
+  const finding = describeFinding(result);
+  const violenceWindows = result?.indian_pilot?.windows || [];
   const actors = result
     ? result.behavior.windows.length
       ? Math.max(...result.behavior.windows.map((w) => w.actor_count))
       : null
     : null;
-  const alert = result?.final_alert;
   const alertTitle = !result
     ? "Awaiting analysis"
-    : alert.state === "no_anomaly"
-      ? "No anomaly"
-      : alert.state === "generic_anomaly"
-        ? "General anomaly"
-        : "Suspicious human-centric behavior";
-  const disagreement = result?.behavior.windows.some(
-    (w) => w.model_disagreement,
-  );
+    : verdict.state === "unavailable"
+      ? "No violence answer"
+      : verdictLabel(verdict.state);
   async function refresh() {
     try {
       setStatus(await api("/api/status"));
@@ -427,7 +436,7 @@ function App() {
       <div className="workspace-bar">
         <div>
           <span className="eyebrow">Two-Paper Cascade</span>
-          <h1>Video behavior analysis</h1>
+          <h1>Violence detection</h1>
         </div>
         <div className="workspace-info">
           <span>Frozen models · fixed thresholds</span>
@@ -517,12 +526,10 @@ function App() {
                   </span>
                   <span>
                     <strong>
-                      {e.name
-                        .replace(" example", "")
-                        .replace("Limitation: ", "")}
+                      {mode === "limitation" ? "Limitation" : "Example"} clip{" "}
+                      {i + 1}
                     </strong>
                     <small>
-                      {e.expected_behavior} label ·{" "}
                       {e.video_available && e.cache_available
                         ? "Local cache installed"
                         : "Awaiting assets"}
@@ -555,7 +562,9 @@ function App() {
                 <Icon name="camera" />
                 {mode === "live"
                   ? filename || "Live video upload"
-                  : selected?.name || "Video workspace"}
+                  : selected
+                    ? `${mode === "limitation" ? "Limitation" : "Example"} clip ${examples.indexOf(selected) + 1}`
+                    : "Video workspace"}
               </h2>
               <span className="source-label">
                 {mode === "live"
@@ -663,11 +672,11 @@ function App() {
           <Timeline result={result} current={current} onSeek={seek} />
           <section className="panel intervals-panel">
             <div className="panel-heading">
-              <h2>Interval evidence</h2>
+              <h2>Violence over time</h2>
               <span className="muted">
-                {result
-                  ? `${result.behavior.windows.length} analyzed windows`
-                  : "Anomaly → actors → behavior"}
+                {violenceWindows.length
+                  ? `${violenceWindows.length} two-second windows`
+                  : "Violence / non-violence per window"}
               </span>
             </div>
             <div className="table-scroll">
@@ -675,46 +684,38 @@ function App() {
                 <thead>
                   <tr>
                     <th>Time interval</th>
-                    <th>Actors</th>
-                    <th>Detected behavior</th>
-                    <th>Anomaly</th>
-                    <th>Agreement</th>
+                    <th>Violence score</th>
+                    <th>Answer</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result?.behavior.windows.map((w, i) => (
+                  {violenceWindows.map((w, i) => (
                     <tr key={i}>
                       <td>
                         <button
                           className="seek-button numeric"
-                          onClick={() => seek(w.interval[0])}
+                          onClick={() => seek(w.start_sec)}
                         >
-                          {clock(w.interval[0])}–{clock(w.interval[1])}
+                          {clock(w.start_sec)}–{clock(w.end_sec)}
                         </button>
                       </td>
-                      <td className="numeric">{w.actor_count}</td>
-                      <td>{w.predicted_behavior || "Unavailable"}</td>
-                      <td className="numeric">{number(w.anomaly_score)}</td>
+                      <td className="numeric">{number(w.violence_score)}</td>
                       <td>
-                        <span
-                          className={w.model_disagreement ? "warning-text" : ""}
-                        >
-                          {w.model_disagreement
-                            ? "Models disagree"
-                            : w.status === "no_actors"
-                              ? "No actors"
-                              : "Available"}
+                        <span className={w.above_threshold ? "warning-text" : ""}>
+                          {w.above_threshold ? "Violence" : "Non-violence"}
                         </span>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {!result?.behavior.windows.length && (
+              {!violenceWindows.length && (
                 <div className="table-empty">
                   {result
-                    ? "No suspicious interval routed to behavior analysis. Actors were not examined."
-                    : "Run analysis to inspect suspicious intervals and model agreement."}
+                    ? result.indian_pilot
+                      ? `One score for the whole video: ${number(verdict.score)}.`
+                      : "No violence score for this result."
+                    : "Run analysis to see violence scores over time."}
                 </div>
               )}
             </div>
@@ -748,7 +749,7 @@ function App() {
             <div
               className={
                 "review-content " +
-                (alert?.state === "no_anomaly" ? "normal" : "")
+                (verdict.state === "violence" ? "" : "normal")
               }
             >
               <span className="eyebrow">
@@ -756,16 +757,10 @@ function App() {
               </span>
               <h3>{alertTitle}</h3>
               <p>
-                {alert?.reason ||
-                  "Select an example or upload a video to inspect the frozen research cascade."}
+                {result
+                  ? finding.text
+                  : "Select an example or upload a video to check it for violence."}
               </p>
-              {disagreement && (
-                <div className="disagreement">
-                  <strong>Models disagree</strong>
-                  <span>Anomaly detector: suspicious</span>
-                  <span>Behavior classifier: Normal / uncertain</span>
-                </div>
-              )}
             </div>
             <div className="metric-row">
               <span>Sultani score</span>
@@ -782,7 +777,7 @@ function App() {
             {result?.indian_pilot && (
               <>
                 <div className="metric-row" title={result.indian_pilot.scope}>
-                  <span>Indian pilot score</span>
+                  <span>Violence score</span>
                   <strong className="numeric">
                     {number(result.indian_pilot.violence_score)}{" "}
                     <span className="fixed">
@@ -792,50 +787,50 @@ function App() {
                   </strong>
                 </div>
                 <p className="pilot-note">
-                  Pilot head trained on Indian, DCSASS, UBI-Fights and XD-Violence
-                  clips. Shown for human review only; it does not change the alert
-                  above.
+                  Violence / non-violence model trained on Indian, DCSASS,
+                  UBI-Fights and XD-Violence clips. For human review only.
                 </p>
               </>
             )}
           </section>
           <section className="panel probability-panel">
             <div className="panel-heading">
-              <h2>Detected behavior</h2>
-              <span className="muted">Color actor features</span>
+              <h2>Violence detection</h2>
+              <span className="muted">Two classes</span>
             </div>
             <div className="prediction-label">
-              <span>Predicted class</span>
-              <strong>{chosen?.predicted_behavior || "Unavailable"}</strong>
+              <span>Answer</span>
+              <strong>{result ? verdictLabel(verdict.state) : "—"}</strong>
             </div>
             <div className="probabilities">
-              {classes.map((name, i) => (
+              {[
+                ["Violence", verdict.score],
+                ["Non-violence", verdict.score === null ? null : 1 - verdict.score],
+              ].map(([name, value]) => (
                 <div
                   className={
                     "probability " +
-                    (chosen?.predicted_behavior === name ? "leading" : "")
+                    (result && verdictLabel(verdict.state) === name ? "leading" : "")
                   }
                   key={name}
                 >
                   <div>
                     <span>{name}</span>
                     <span className="numeric">
-                      {probabilities
-                        ? `${(probabilities[i] * 100).toFixed(1)}%`
-                        : "—"}
+                      {value === null ? "—" : `${(value * 100).toFixed(1)}%`}
                     </span>
                   </div>
                   <div className="bar-track">
-                    {probabilities && (
-                      <i style={{ width: `${probabilities[i] * 100}%` }} />
-                    )}
+                    {value !== null && <i style={{ width: `${value * 100}%` }} />}
                   </div>
                 </div>
               ))}
             </div>
             <p className="small panel-note">
-              {result && !chosen ? "Behavior unavailable or skipped. " : ""}
-              Model probabilities are uncalibrated.
+              {verdict.threshold !== null
+                ? `Flagged as violence at ${number(verdict.threshold)} or above. `
+                : ""}
+              Scores are uncalibrated.
             </p>
           </section>
           <section className="panel system-panel">
@@ -931,8 +926,7 @@ function App() {
             74.32%, F1 0.7383. Dcsass accuracy 51.02%, macro F1 0.2140, balanced
             accuracy 22.87%. Binary anomaly accuracy 58.31%, F1 0.6093, area
             under curve 0.6307. Sultani Ucf frame area under curve 0.7441.
-            Held-out cascade F1 0.4733, area under curve 0.5118. No correct
-            Abuse, Assault or Fighting predictions in the measured Dcsass run.
+            Held-out cascade F1 0.4733, area under curve 0.5118.
             This is not reliable production violence detection.
           </p>
         </details>

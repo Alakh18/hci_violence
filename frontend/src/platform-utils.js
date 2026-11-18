@@ -5,16 +5,23 @@ export function toggleSelection(selected, id) {
   return selected.includes(id) ? selected.filter(value => value !== id) : [...selected, id];
 }
 
-const behaviorWords = { Normal: "normal activity", Abuse: "someone being hurt or mistreated", Assault: "someone being attacked", Fighting: "people fighting", Robbery: "a robbery", Vandalism: "property being damaged" };
-export function behaviorText(behavior) {
-  return behaviorWords[behavior] || "something unusual";
+// The website reports one decision only: violence or non-violence, from the binary
+// violence head ("indian_pilot"). Six-class behavior labels are never shown.
+export function violenceVerdict(result) {
+  const pilot = result?.indian_pilot;
+  if (!pilot || !Number.isFinite(pilot.violence_score)) return { state: "unavailable", score: null, threshold: null };
+  return { state: pilot.flagged ? "violence" : "non_violence", score: pilot.violence_score, threshold: pilot.threshold };
+}
+export function verdictLabel(state) {
+  return { violence: "Violence", non_violence: "Non-violence" }[state] ?? "Not available";
 }
 export function describeFinding(result) {
-  const alert = result?.final_alert;
-  if (!alert) return { tone: "muted", text: "The app could not look at this video." };
-  if (alert.state === "behavior_review") return { tone: alert.behavior === "Normal" ? "ok" : "warn", text: `The app thinks it saw ${behaviorText(alert.behavior)}.` };
-  if (alert.state === "generic_anomaly") return { tone: "warn", text: "The app saw something unusual, but could not tell what it was." };
-  return { tone: "ok", text: "The app did not see anything unusual." };
+  if (!result) return { tone: "muted", text: "The app could not look at this video." };
+  const verdict = violenceVerdict(result);
+  if (verdict.state === "violence") return { tone: "bad", text: "The app thinks this video shows violence." };
+  if (verdict.state === "non_violence") return { tone: "ok", text: "The app did not see violence in this video." };
+  if (result.execution_mode === "cached_example") return { tone: "muted", text: "This saved example has no violence score. Upload the clip to check it with the violence model." };
+  return { tone: "muted", text: "The violence model is not loaded. Start the app with --indian-pilot to get a violence / non-violence answer." };
 }
 
 export const decisions = [
@@ -35,22 +42,48 @@ export function itemStatus(status, reviewed) {
   return { tone: "bad", icon: "cross", label: "Couldn't check" };
 }
 
-// Routed behavior windows first; otherwise merged anomaly segments at or above the frozen threshold.
+// Where violence was flagged: the violence head's flagged 2 s windows when it reports
+// them, otherwise the whole video when the clip as a whole was flagged.
 export function flaggedMoments(result) {
-  const windows = result?.behavior?.windows || [];
-  if (windows.length) return windows.map(w => [w.interval[0], w.interval[1]]);
-  const anomaly = result?.anomaly, threshold = result?.policy?.anomaly_threshold;
-  if (!anomaly || threshold == null) return [];
-  const merged = [];
-  anomaly.segment_scores.forEach((score, i) => {
-    if (score < threshold) return;
-    const [start, end] = anomaly.timestamps[i], last = merged[merged.length - 1];
-    if (last && start <= last[1]) last[1] = Math.max(last[1], end); else merged.push([start, end]);
-  });
-  return merged;
+  const pilot = result?.indian_pilot;
+  if (!pilot?.flagged) return [];
+  if (pilot.flagged_intervals?.length) return pilot.flagged_intervals.map(([a, b]) => [a, b]);
+  const duration = result?.anomaly?.metadata?.duration_sec;
+  return Number.isFinite(duration) ? [[0, duration]] : [];
 }
 
 export function clockText(seconds) {
   const s = Math.max(0, Math.floor(Number(seconds) || 0));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// Plots the violence score of each 2 s window (the same numbers as the "Violence over
+// time" table) against the violence threshold. Falls back to the anomaly model's
+// segment scores only when no violence scores exist for this result.
+export function timelineSeries(result) {
+  const pilot = result?.indian_pilot;
+  const anomaly = result?.anomaly;
+  if (pilot?.windows?.length) {
+    return {
+      kind: "violence",
+      points: pilot.windows.map((w) => ({
+        start: w.start_sec,
+        end: w.end_sec,
+        score: w.violence_score,
+      })),
+      threshold: pilot.threshold,
+    };
+  }
+  if (anomaly?.segment_scores?.length) {
+    return {
+      kind: "anomaly",
+      points: anomaly.segment_scores.map((score, i) => ({
+        start: anomaly.timestamps[i][0],
+        end: anomaly.timestamps[i][1],
+        score,
+      })),
+      threshold: result?.policy?.anomaly_threshold ?? 0.5,
+    };
+  }
+  return null;
 }

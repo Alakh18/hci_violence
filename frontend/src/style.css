@@ -527,6 +527,9 @@ h1 {
   stroke: var(--mp-surface);
   stroke-width: 2;
 }
+.chart-dot.above {
+  fill: var(--mp-bad);
+}
 .timeline .chart-empty {
   font-family: inherit;
   font-size: 15px;
